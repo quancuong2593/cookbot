@@ -5,7 +5,7 @@ services:
     container_name: cookbot
     env_file: .env
     restart: unless-stopped
-    command: python bot.py
+    command: python -m runners.local
 
   scheduler:
     build: .
@@ -13,4 +13,4 @@ services:
     container_name: cookbot-scheduler
     env_file: .env
     restart: unless-stopped
-    command: python scheduler.py
+    command: python -m runners.scheduler

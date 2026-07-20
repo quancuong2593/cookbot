@@ -11,6 +11,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy code sau
+COPY core/ core/
+COPY runners/ runners/
 COPY *.py .
 
 CMD ["python", "bot.py"]
