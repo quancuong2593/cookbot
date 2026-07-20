@@ -16,7 +16,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    answer = await handle_message(cid, text)
+    answer = await handle_message(cid, text, notify_admin=notifier.send_log)
     if answer is None:
         return
 
