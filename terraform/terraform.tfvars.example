@@ -1,0 +1,21 @@
+# Copy file nay thanh terraform.tfvars roi dien gia tri that.
+# terraform.tfvars KHONG duoc commit (da chan trong .gitignore).
+
+telegram_token    = "123456789:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+log_bot_token     = "987654321:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+anthropic_api_key = "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+webhook_secret    = "chuoi-ngau-nhien-du-dai-vi-du-openssl-rand-hex-32"
+
+allowed_chat_ids = "111111111,222222222"
+admin_chat_id    = "111111111"
+# daily_chat_ids  = ""   # de trong = dung chung allowed_chat_ids
+
+budget_alert_email = "you@example.com"
+
+# aws_region = "ap-southeast-1"
+# image_tag  = "latest"
+# mirror_all = "0"
+# chef_name  = "chị Như"
+# model      = "claude-haiku-4-5"
+# lat        = "21.03"
+# lon        = "105.85"

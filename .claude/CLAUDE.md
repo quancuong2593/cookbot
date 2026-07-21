@@ -22,11 +22,14 @@ cookbot/
 │   ├── handler.py        # handle_message(chat_id, text) -> str | None — gate whitelist + gọi brain
 │   └── daily.py          # main() — build thực đơn 9h, gửi cho DAILY_CHAT_IDS
 ├── runners/               # Biết mình chạy ở đâu — lo transport (Telegram) + trình bày (mirror log)
-│   ├── local.py           # Process 1: long polling (python-telegram-bot), gọi core.handler
-│   └── scheduler.py       # Process 2: vòng lặp ngủ đến 9h rồi gọi core.daily.main()
+│   ├── local.py           # Process 1 (VPS): long polling (python-telegram-bot), gọi core.handler
+│   ├── scheduler.py       # Process 2 (VPS): vòng lặp ngủ đến 9h rồi gọi core.daily.main()
+│   ├── lambda_bot.py      # Handler Lambda: webhook Telegram qua Function URL, gọi core.handler
+│   └── lambda_daily.py    # Handler Lambda: gọi core.daily.main(), kích hoạt bởi EventBridge cron
 ├── bot.py, daily.py, scheduler.py   # DEPRECATED — shim mỏng gọi sang runners/core, sẽ xoá sau khi ổn định
 ├── .env                  # Secrets — KHÔNG BAO GIỜ commit
-├── Dockerfile
+├── Dockerfile             # Image cho runners/local.py + runners/scheduler.py (VPS)
+├── Dockerfile.lambda      # Image chung cho lambda_bot + lambda_daily (CMD override lúc deploy)
 └── docker-compose.yml
 ```
 
@@ -93,6 +96,7 @@ docker compose down
 | `CHEF_NAME` | Tên gọi bếp trưởng, mặc định "chị Như" |
 | `MODEL` | Model Claude, mặc định `claude-haiku-4-5` |
 | `LAT` / `LON` | Toạ độ lấy thời tiết |
+| `WEBHOOK_SECRET` | Bí mật xác thực webhook Telegram gọi vào `runners/lambda_bot.py` (header `X-Telegram-Bot-Api-Secret-Token`), chỉ dùng khi chạy trên Lambda |
 
 ## Quy ước khi làm việc với Claude Code
 
@@ -102,17 +106,43 @@ docker compose down
 - Trước khi refactor, xác nhận hành vi không đổi
 - Không tự ý thêm dependency mới nếu chưa cần thiết
 
+## Kế hoạch Terraform (liệt kê tài nguyên, chưa viết code)
+
+Deploy `Dockerfile.lambda` lên AWS cần các tài nguyên sau (xem [COSTS.md](../COSTS.md) cho chi phí ước tính từng mục):
+
+- `aws_ecr_repository` — chứa image build từ `Dockerfile.lambda`
+- `aws_ecr_lifecycle_policy` — giữ tối đa 5 image gần nhất (khớp COSTS.md)
+- `aws_lambda_function` × 2 — `cookbot-bot` (CMD `runners.lambda_bot.lambda_handler`) và `cookbot-daily` (CMD `runners.lambda_daily.lambda_handler`), cùng trỏ vào 1 image ECR, khác `image_config.command` (xem DECISIONS.md mục "một image cho nhiều handler")
+- `aws_lambda_function_url` — gắn vào `cookbot-bot`, dùng làm webhook URL đăng ký với Telegram (`setWebhook` + `secret_token` = `WEBHOOK_SECRET`)
+- `aws_cloudwatch_event_rule` + `aws_cloudwatch_event_target` — lịch cron 9h sáng giờ Việt Nam, kích hoạt `cookbot-daily` (thay cho vòng lặp ngủ của `runners/scheduler.py`)
+- `aws_cloudwatch_log_group` × 2 — 1 cho mỗi Lambda, `retention_in_days = 14`
+- `aws_budgets_budget` — ngưỡng $1, cảnh báo ở 80% actual và 100% forecasted, gửi email — xem chi tiết giải thích ngay dưới đây
+- Biến môi trường của cả 2 Lambda đọc từ `aws_lambda_function.environment` (Terraform variable/secret, không nướng vào image — đúng nguyên tắc "Secrets tiêm lúc chạy" ở trên)
+
+### `aws_budgets_budget` — chi tiết
+
+- `budget_type = "COST"`, `limit_amount = "1"`, `limit_unit = "USD"`, `time_unit = "MONTHLY"`
+- 2 `notification` block:
+  - `threshold = 80`, `threshold_type = "PERCENTAGE"`, `notification_type = "ACTUAL"` — đã tiêu thật 80% ngưỡng
+  - `threshold = 100`, `threshold_type = "PERCENTAGE"`, `notification_type = "FORECASTED"` — AWS dự báo cả tháng sẽ vượt 100% ngưỡng, dù hiện tại chưa tiêu tới
+  - Cả 2 gửi tới email của tôi qua `subscriber_email_address`
+- Đây là budget **chỉ cảnh báo** (không action-enabled) — theo COSTS.md, loại này miễn phí, không tính vào quota "2 budget miễn phí/tháng" của loại action-enabled
+
+**Vì sao AWS chỉ cảnh báo mà không tự chặn chi tiêu:** AWS Budgets mặc định chỉ là hệ thống giám sát (monitoring), không phải cầu dao ngắt mạch. Lý do kỹ thuật: chi phí AWS thường phát sinh từ tài nguyên đã và đang chạy (Lambda đang xử lý request, dữ liệu đã lưu trên ECR/CloudWatch) — AWS không thể "hoàn tác" chi phí đã phát sinh, và việc tự động xoá/tắt tài nguyên sản xuất có thể gây hại nhiều hơn (mất dữ liệu, sập dịch vụ đang chạy) so với việc để một khoản phí nhỏ phát sinh rồi con người quyết định. Muốn AWS **tự chặn** thật sự phải cấu hình riêng "action-enabled budget" (tự áp IAM policy chặn quyền, hoặc gọi Lambda tự tắt tài nguyên) — loại này mất phí ($0,10/ngày sau 2 budget đầu) và có rủi ro tự làm gián đoạn dịch vụ, nên CookBot ở quy mô gia đình không cần tới.
+
+**Budget nên đặt ở đâu trong cấu trúc Terraform:** `aws_budgets_budget` không thuộc về tài nguyên nào cụ thể (không phải Lambda, không phải ECR) — nó là chính sách ở cấp **billing/account**, không đổi theo môi trường (dev/prod) như các resource khác. Nên đặt trong một module/file riêng (ví dụ `budget.tf` hoặc module `governance/`), tách khỏi module `lambda/` hay `ecr/` — để có thể `terraform apply` chỉ phần hạ tầng ứng dụng mà không đụng tới chính sách chi tiêu, và ngược lại sửa ngưỡng budget không cần plan lại toàn bộ Lambda/ECR.
+
 ## Trạng thái hiện tại & việc tiếp theo
 
-**Đã xong:** bot trả lời realtime, gate whitelist, mirror log qua bot riêng, thực đơn 9h sáng (2 option/bữa, cuối tuần thêm bữa trưa), Docker Compose 2 service, tách `core/` (logic thuần) khỏi `runners/` (transport + trình bày) để chuẩn bị chạy song song Lambda/VPS.
+**Đã xong:** bot trả lời realtime, gate whitelist, mirror log qua bot riêng, thực đơn 9h sáng (2 option/bữa, cuối tuần thêm bữa trưa), Docker Compose 2 service, tách `core/` (logic thuần) khỏi `runners/` (transport + trình bày), viết `runners/lambda_bot.py` + `runners/lambda_daily.py` + `Dockerfile.lambda` (build thử thành công, chưa deploy), bộ test pytest cho `core/`.
 
-**Đang làm:** tách môi trường dev/prd, dựng quy trình Git chuẩn, viết test, CI/CD.
+**Đang làm:** tách môi trường dev/prd, dựng quy trình Git chuẩn, viết Terraform để deploy Lambda thật (Function URL, EventBridge cron, ECR, `aws_budgets_budget`), CI/CD.
 
-**Kế hoạch xa:** conversation memory (bot đang stateless, quên câu trước), family profile (dị ứng, món ghét), feedback loop bằng inline buttons, deploy AWS Lambda (thêm `runners/lambda.py` gọi lại `core.handler`), port sang Messenger.
+**Kế hoạch xa:** conversation memory (bot đang stateless, quên câu trước), family profile (dị ứng, món ghét), feedback loop bằng inline buttons, port sang Messenger.
 
 **Nợ kỹ thuật đã biết:**
 - Thêm người dùng phải sửa `.env` + restart container
-- Chưa có test tự động
 - Chưa chống gửi trùng nếu scheduler restart đúng lúc 9h
 - Log ghi trong container, mất khi `docker compose down`
 - `bot.py` / `daily.py` / `scheduler.py` ở gốc là shim deprecated — xoá ở commit riêng sau khi `runners.*`/`core.*` chạy ổn định qua Docker
+- **Webhook retry có thể gây trả lời trùng:** `runners/lambda_bot.py` gọi Claude (`handle_message`) xong mới trả `200` cho Telegram. Nếu Claude chậm hơn thời gian Telegram sẵn sàng chờ, Telegram coi webhook lỗi và gửi lại đúng update đó → Claude bị gọi 2 lần cho cùng 1 câu hỏi, chị Như nhận 2 câu trả lời. Hướng xử lý khi cần: (a) trả `200` ngay sau khi xác thực + parse xong, đẩy việc gọi Claude vào SQS xử lý bất đồng bộ, hoặc (b) đơn giản hơn — lưu `update_id` đã xử lý (ví dụ DynamoDB/S3 nhỏ) làm idempotency key, thấy trùng thì trả `200` luôn mà không gọi lại Claude. Chưa làm vì rủi ro thấp trong thực tế (Haiku thường trả lời dưới 2 giây) và muốn giữ kiến trúc đơn giản cho tới khi có traffic thật.

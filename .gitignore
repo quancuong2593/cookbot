@@ -2,3 +2,10 @@
 .venv/
 __pycache__/
 cookbot.log
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.tfvars
+!terraform/terraform.tfvars.example

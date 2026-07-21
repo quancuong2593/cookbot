@@ -17,6 +17,9 @@ DAILY_CHAT_IDS = {x.strip() for x in
 
 MODEL = os.getenv("MODEL", "claude-haiku-4-5")
 
+# Bi mat xac thuc webhook Telegram goi vao Lambda (X-Telegram-Bot-Api-Secret-Token)
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
 # Toạ độ Hà Nội
 LAT = float(os.getenv("LAT", "21.03"))
 LON = float(os.getenv("LON", "105.85"))
