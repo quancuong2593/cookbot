@@ -15,4 +15,4 @@ COPY core/ core/
 COPY runners/ runners/
 COPY *.py .
 
-CMD ["python", "bot.py"]
+CMD ["python", "-m", "runners.local"]

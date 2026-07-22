@@ -26,7 +26,6 @@ cookbot/
 │   ├── scheduler.py       # Process 2 (VPS): vòng lặp ngủ đến 9h rồi gọi core.daily.main()
 │   ├── lambda_bot.py      # Handler Lambda: webhook Telegram qua Function URL, gọi core.handler
 │   └── lambda_daily.py    # Handler Lambda: gọi core.daily.main(), kích hoạt bởi EventBridge cron
-├── bot.py, daily.py, scheduler.py   # DEPRECATED — shim mỏng gọi sang runners/core, sẽ xoá sau khi ổn định
 ├── tests/                 # pytest cho core/ + notifier.py, mock hoàn toàn Claude/Telegram/Open-Meteo
 │   ├── conftest.py        # reload_config fixture + env giả mặc định
 │   ├── test_handler.py
@@ -36,7 +35,7 @@ cookbot/
 │   └── test_notifier.py   # setup_logging() không tạo FileHandler khi chạy trên Lambda
 ├── terraform/             # Hạ tầng production trên AWS — xem terraform/*.tf, chi tiết ở mục riêng bên dưới
 ├── .env                  # Secrets — KHÔNG BAO GIỜ commit
-├── Dockerfile             # Image cho runners/local.py + runners/scheduler.py (VPS)
+├── Dockerfile             # Image cho runners/local.py + runners/scheduler.py (VPS), CMD mặc định `python -m runners.local`
 ├── Dockerfile.lambda      # Image chung cho lambda_bot + lambda_daily (CMD override lúc deploy)
 └── docker-compose.yml
 ```
@@ -47,7 +46,7 @@ cookbot/
 
 **Hai loại process, khác vòng đời:**
 - `runners/local.py` — reactive, chạy liên tục, chờ tin nhắn đến
-- `core/daily.py` — proactive, chạy 30 giây rồi kết thúc, gọi bởi `runners/scheduler.py`
+- `core/daily.py` — proactive, chạy 30 giây rồi kết thúc, gọi bởi `runners/scheduler.py` (VPS/dev) hoặc `runners/lambda_daily.py` qua EventBridge Scheduler (production)
 
 ## Quy tắc thiết kế (bắt buộc tuân thủ)
 
@@ -87,8 +86,6 @@ docker compose logs -f scheduler
 docker compose run --rm bot python -m core.daily    # chạy daily thủ công
 docker compose down
 ```
-
-`bot.py` / `daily.py` / `scheduler.py` ở gốc vẫn chạy được (shim deprecated, gọi sang `runners.*`/`core.*`), nhưng lệnh và code mới dùng đường dẫn `-m runners.*` / `-m core.*` ở trên.
 
 ```bash
 # --- Production (AWS Lambda, hạ tầng quản lý bằng Terraform trong terraform/) ---
@@ -210,9 +207,8 @@ AWS bắt buộc giữ tối thiểu 10 "unreserved concurrent executions" cho t
 
 **Nợ kỹ thuật đã biết:**
 - Thêm người dùng phải sửa `.env` + restart container
-- Chưa chống gửi trùng nếu scheduler restart đúng lúc 9h
-- Log ghi trong container, mất khi `docker compose down`
-- `bot.py` / `daily.py` / `scheduler.py` ở gốc là shim deprecated — xoá ở commit riêng sau khi `runners.*`/`core.*` chạy ổn định qua Docker
+- Chưa chống gửi trùng nếu scheduler restart đúng lúc 9h — **chỉ áp dụng cho VPS/dev** (vòng lặp ngủ của `runners/scheduler.py`). Production dùng `aws_scheduler_schedule` (EventBridge Scheduler), không có vòng lặp tự tính giờ nên không có kiểu race này (rủi ro duy nhất còn lại là "Webhook retry" ở bullet dưới, khác cơ chế).
+- Log ghi trong container, mất khi `docker compose down` — **chỉ áp dụng cho VPS/dev** (`runners/local.py`/`runners/scheduler.py` qua `docker-compose.yml`). Production trên Lambda không có vấn đề này — log đi CloudWatch, `retention_in_days = 14` (xem mục Terraform).
 - **Webhook retry có thể gây trả lời trùng:** `runners/lambda_bot.py` gọi Claude (`handle_message`) xong mới trả `200` cho Telegram. Nếu Claude chậm hơn thời gian Telegram sẵn sàng chờ, Telegram coi webhook lỗi và gửi lại đúng update đó → Claude bị gọi 2 lần cho cùng 1 câu hỏi, chị Như nhận 2 câu trả lời. Hướng xử lý khi cần: (a) trả `200` ngay sau khi xác thực + parse xong, đẩy việc gọi Claude vào SQS xử lý bất đồng bộ, hoặc (b) đơn giản hơn — lưu `update_id` đã xử lý (ví dụ DynamoDB/S3 nhỏ) làm idempotency key, thấy trùng thì trả `200` luôn mà không gọi lại Claude. Chưa làm vì rủi ro thấp trong thực tế (Haiku thường trả lời dưới 2 giây) và muốn giữ kiến trúc đơn giản cho tới khi có traffic thật.
 - **Tag image `"latest"` khiến `terraform apply` báo "No changes" dù image đã đổi** — Terraform chỉ so chuỗi `image_uri`, không hỏi ECR image thật là gì (xem DECISIONS.md mục "Tag image bằng git SHA"). Phải chuyển sang tag theo git SHA khi dựng CI/CD, `"latest"` hiện chỉ dùng cho deploy thủ công.
 - **Permission `lambda:InvokeFunction` trên Function URL đang rộng hơn bản Console tự tạo** — `aws_lambda_permission.function_url_invoke` (action `lambda:InvokeFunction`) thiếu điều kiện `lambda:InvokedViaFunctionUrl` mà Console tự thêm để giới hạn quyền đó CHỈ cho phép invoke đến từ chính Function URL. Đã thử gán `function_url_auth_type` cho resource này nhưng AWS từ chối thẳng: `"FunctionUrlAuthType is only supported for lambda:InvokeFunctionUrl action"` — tham số đó chỉ hợp lệ trên permission có action `InvokeFunctionUrl` (permission đầu), không áp dụng được cho `InvokeFunction` (permission thứ hai). `aws_lambda_permission` của Terraform provider hiện không có tham số nào để khai báo điều kiện `lambda:InvokedViaFunctionUrl`, nên permission trong `main.tf` là quyền `InvokeFunction` không điều kiện — rộng hơn cần thiết (bất kỳ principal nào gọi được `InvokeFunction`, không riêng gì qua Function URL). Rủi ro thấp (function vẫn chỉ chạy được với `WEBHOOK_SECRET` đúng, gate nằm ở tầng ứng dụng), nhưng là chỗ lệch giữa "làm đúng qua Console" và "làm qua Terraform" cần nhớ. Đã `apply` thành công với 2 permission này, không có drift.

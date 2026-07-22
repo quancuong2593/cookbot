@@ -3,7 +3,8 @@ import logging
 
 import core.daily as daily
 
-# Xem ghi chu trong lambda_bot.py: khong dung notifier.setup_logging() o day.
+# daily.main() co goi notifier.setup_logging() ben trong — an toan tren Lambda
+# vi setup_logging() da kiem tra AWS_LAMBDA_FUNCTION_NAME va khong tao FileHandler.
 logging.getLogger().setLevel(logging.INFO)
 
 
