@@ -1,7 +1,8 @@
 import logging
 from typing import Awaitable, Callable
 
-import config, brain
+import config, brain, weather
+import core.mealtime as mealtime
 
 NotifyAdmin = Callable[[str], Awaitable[None]]
 
@@ -14,4 +15,13 @@ async def handle_message(chat_id: str, text: str, notify_admin: NotifyAdmin) -> 
         return None
 
     logging.info(f"Tin tu {chat_id}: {text[:40]}")
-    return await brain.ask(text)
+
+    meals = mealtime.current_meals_now()
+    try:
+        today_weather = await weather.get_today()
+    except Exception as e:
+        # Khong de loi thoi tiet lam im lang bot — tra loi tiep, chi thieu ngu canh.
+        logging.error(f"Loi lay thoi tiet cho chat: {e}")
+        today_weather = None
+
+    return await brain.ask(text, today_weather, meals)

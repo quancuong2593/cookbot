@@ -19,8 +19,9 @@ cookbot/
 ├── brain.py             # Gọi Claude API, chứa system prompts
 ├── weather.py           # Lấy thời tiết Open-Meteo
 ├── core/                 # Logic nghiệp vụ thuần — không import telegram, không biết mình chạy ở đâu
-│   ├── handler.py        # handle_message(chat_id, text) -> str | None — gate whitelist + gọi brain
-│   └── daily.py          # main() — build thực đơn 9h, gửi cho DAILY_CHAT_IDS
+│   ├── handler.py        # handle_message(chat_id, text) -> str | None — gate whitelist + gọi brain, có ngữ cảnh bữa/thời tiết
+│   ├── daily.py          # main(slot) — build thực đơn 9h sáng hoặc bữa sáng cuối tuần 21h, gửi cho DAILY_CHAT_IDS
+│   └── mealtime.py       # current_meals(day_index, hour) — xác định đang hỏi cho bữa nào, thuần túy để test độc lập
 ├── runners/               # Biết mình chạy ở đâu — lo transport (Telegram) + trình bày (mirror log)
 │   ├── local.py           # Process 1 (VPS): long polling (python-telegram-bot), gọi core.handler
 │   ├── scheduler.py       # Process 2 (VPS): vòng lặp ngủ đến 9h rồi gọi core.daily.main()
@@ -47,6 +48,8 @@ cookbot/
 **Hai loại process, khác vòng đời:**
 - `runners/local.py` — reactive, chạy liên tục, chờ tin nhắn đến
 - `core/daily.py` — proactive, chạy 30 giây rồi kết thúc, gọi bởi `runners/scheduler.py` (VPS/dev) hoặc `runners/lambda_daily.py` qua EventBridge Scheduler (production)
+
+**Giới hạn đã biết của `runners/scheduler.py` (VPS/dev):** vòng lặp ngủ chỉ tính "9h sáng hôm sau", **không** biết tới 2 lịch bữa sáng cuối tuần (21h thứ Sáu/Bảy) mà production có qua `aws_scheduler_schedule` trong `terraform/main.tf`. Đây là quyết định có chủ đích, không phải thiếu sót — VPS là môi trường dev, không cần khớp 100% lịch production. Muốn test slot `"evening"` trên VPS thì gọi tay: `docker compose run --rm bot python -c "import asyncio, core.daily as d; asyncio.run(d.main('evening'))"`.
 
 ## Quy tắc thiết kế (bắt buộc tuân thủ)
 
@@ -146,6 +149,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST "$FUNCTION_URL" \
 | `MODEL` | Model Claude, mặc định `claude-haiku-4-5` |
 | `LAT` / `LON` | Toạ độ lấy thời tiết |
 | `WEBHOOK_SECRET` | Bí mật xác thực webhook Telegram gọi vào `runners/lambda_bot.py` (header `X-Telegram-Bot-Api-Secret-Token`), chỉ dùng khi chạy trên Lambda |
+| `MEAL_BOUNDARY_HOUR` | Giờ ranh giới (0-23, mặc định `12`) để xác định T7/CN đang hỏi "trưa+tối" hay chỉ "tối" — xem `core/mealtime.py` |
 
 ## Quy ước khi làm việc với Claude Code
 
@@ -163,7 +167,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST "$FUNCTION_URL" \
 - `aws_ecr_lifecycle_policy` — giữ tối đa 5 image gần nhất (khớp COSTS.md)
 - `aws_lambda_function` × 2 — `cookbot-bot-prd` (CMD `runners.lambda_bot.lambda_handler`) và `cookbot-daily-prd` (CMD `runners.lambda_daily.lambda_handler`), cùng trỏ vào 1 image ECR, khác `image_config.command` (xem DECISIONS.md mục "một image cho nhiều handler"); timeout 60s, memory 256MB, không đặt `reserved_concurrent_executions` (xem "Cạm bẫy đã gặp" #4)
 - `aws_lambda_function_url` — gắn vào `cookbot-bot-prd`, `authorization_type = NONE`, dùng làm webhook URL đăng ký với Telegram (`setWebhook` + `secret_token` = `WEBHOOK_SECRET`) — xem DECISIONS.md mục "Function URL authorization_type = NONE"
-- `aws_scheduler_schedule` (EventBridge Scheduler, không phải Rule kiểu cũ) — cron 9h sáng, `schedule_expression_timezone = "Asia/Ho_Chi_Minh"`, kích hoạt `cookbot-daily-prd` (thay cho vòng lặp ngủ của `runners/scheduler.py`)
+- `aws_scheduler_schedule` × 3 (EventBridge Scheduler, không phải Rule kiểu cũ), `schedule_expression_timezone = "Asia/Ho_Chi_Minh"`, đều kích hoạt `cookbot-daily-prd`: 9h sáng hàng ngày (`input = {slot="morning"}`), 21h thứ Sáu và 21h thứ Bảy (`input = {slot="evening"}`, chuẩn bị bữa sáng cuối tuần) — thay cho vòng lặp ngủ của `runners/scheduler.py`
 - `aws_cloudwatch_log_group` × 2 — 1 cho mỗi Lambda, `retention_in_days = 14`
 - `aws_budgets_budget` — ngưỡng $1, cảnh báo ở 80% actual và 100% forecasted, gửi email — xem chi tiết giải thích ngay dưới đây
 - Biến môi trường của cả 2 Lambda đọc từ `aws_lambda_function.environment` (Terraform variable/secret, không nướng vào image — đúng nguyên tắc "Secrets tiêm lúc chạy" ở trên)
@@ -199,7 +203,7 @@ AWS bắt buộc giữ tối thiểu 10 "unreserved concurrent executions" cho t
 
 ## Trạng thái hiện tại & việc tiếp theo
 
-**Đã xong:** bot trả lời realtime, gate whitelist, mirror log qua bot riêng, thực đơn 9h sáng (2 option/bữa, cuối tuần thêm bữa trưa), Docker Compose 2 service (VPS/dev), tách `core/` (logic thuần) khỏi `runners/` (transport + trình bày), bộ test pytest cho `core/` + `notifier.py`. **Production đã chạy thật trên AWS Lambda** — hạ tầng quản lý hoàn toàn bằng Terraform (`terraform/`), cả `cookbot-bot-prd` (webhook Telegram qua Function URL) và `cookbot-daily-prd` (thực đơn 9h qua EventBridge Scheduler) đều hoạt động, đã đi qua và vá xong 4 cạm bẫy thật (xem mục "Cạm bẫy đã gặp").
+**Đã xong:** bot trả lời realtime, gate whitelist, mirror log qua bot riêng, thực đơn 9h sáng (2 option/bữa, cuối tuần thêm bữa trưa) + bữa sáng cuối tuần gửi tối hôm trước (21h T6/T7, dùng dự báo ngày mai), giải thích ảnh hưởng thời tiết lên cơ thể theo Đông y trước phần gợi ý món, chat tự do biết đang hỏi cho bữa nào (`core/mealtime.py`), Docker Compose 2 service (VPS/dev), tách `core/` (logic thuần) khỏi `runners/` (transport + trình bày), bộ test pytest cho `core/` + `notifier.py`. **Production đã chạy thật trên AWS Lambda** — hạ tầng quản lý hoàn toàn bằng Terraform (`terraform/`), cả `cookbot-bot-prd` (webhook Telegram qua Function URL) và `cookbot-daily-prd` (thực đơn 9h + 2 lịch 21h qua EventBridge Scheduler) đều hoạt động, đã đi qua và vá xong 4 cạm bẫy thật (xem mục "Cạm bẫy đã gặp").
 
 **Đang làm:** tách môi trường dev/prd rõ ràng hơn (hiện dev = VPS/Docker Compose, prd = Lambda — chưa có staging), dựng quy trình Git chuẩn, dựng CI/CD (build image đúng cờ, tag theo git SHA, tự động `terraform apply`).
 

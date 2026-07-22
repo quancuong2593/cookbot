@@ -9,5 +9,6 @@ logging.getLogger().setLevel(logging.INFO)
 
 
 def lambda_handler(event, context):
-    asyncio.run(daily.main())
+    slot = (event or {}).get("slot", "morning")
+    asyncio.run(daily.main(slot))
     return {"statusCode": 200, "body": "ok"}

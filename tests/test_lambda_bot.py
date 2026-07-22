@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock
 
 import brain
 import notifier
+import weather
+import core.mealtime as mealtime
 from runners import lambda_bot
 
 
@@ -20,6 +22,8 @@ def _mock_io(monkeypatch):
     monkeypatch.setattr(brain, "ask", ask_mock)
     monkeypatch.setattr(notifier, "send", send_mock)
     monkeypatch.setattr(notifier, "send_log", send_log_mock)
+    monkeypatch.setattr(weather, "get_today", AsyncMock(return_value="nắng nhẹ"))
+    monkeypatch.setattr(mealtime, "current_meals_now", lambda: ["bữa tối"])
     return ask_mock, send_mock, send_log_mock
 
 
@@ -54,7 +58,7 @@ def test_lambda_bot_valid_message_returns_200(reload_config, monkeypatch):
     result = lambda_bot.lambda_handler(event, None)
 
     assert result["statusCode"] == 200
-    ask_mock.assert_awaited_once_with("hôm nay ăn gì")
+    ask_mock.assert_awaited_once_with("hôm nay ăn gì", "nắng nhẹ", ["bữa tối"])
     send_mock.assert_awaited_once_with(
         "111", "Chào chị Như, hôm nay ăn canh chua nhé")
     send_log_mock.assert_awaited_once()

@@ -23,3 +23,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 # Toạ độ Hà Nội
 LAT = float(os.getenv("LAT", "21.03"))
 LON = float(os.getenv("LON", "105.85"))
+
+# Gio ranh gioi (0-23): truoc gio nay vao T7/CN la "bua trua + bua toi",
+# tu gio nay tro di chi con "bua toi"
+MEAL_BOUNDARY_HOUR = int(os.getenv("MEAL_BOUNDARY_HOUR", "12"))

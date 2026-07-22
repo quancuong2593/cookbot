@@ -245,6 +245,41 @@ resource "aws_scheduler_schedule" "daily" {
   target {
     arn      = aws_lambda_function.daily.arn
     role_arn = aws_iam_role.scheduler_invoke_daily.arn
+    input    = jsonencode({ slot = "morning" })
+  }
+}
+
+# 21h thu Sau: chuan bi bua sang thu Bay (gui toi hom truoc, lay thoi tiet ngay mai)
+resource "aws_scheduler_schedule" "daily_breakfast_fri" {
+  name                         = "cookbot-daily-9pm-fri-prd"
+  schedule_expression          = "cron(0 21 ? * FRI *)"
+  schedule_expression_timezone = "Asia/Ho_Chi_Minh"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_lambda_function.daily.arn
+    role_arn = aws_iam_role.scheduler_invoke_daily.arn
+    input    = jsonencode({ slot = "evening" })
+  }
+}
+
+# 21h thu Bay: chuan bi bua sang Chu Nhat
+resource "aws_scheduler_schedule" "daily_breakfast_sat" {
+  name                         = "cookbot-daily-9pm-sat-prd"
+  schedule_expression          = "cron(0 21 ? * SAT *)"
+  schedule_expression_timezone = "Asia/Ho_Chi_Minh"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_lambda_function.daily.arn
+    role_arn = aws_iam_role.scheduler_invoke_daily.arn
+    input    = jsonencode({ slot = "evening" })
   }
 }
 
