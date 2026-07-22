@@ -185,6 +185,13 @@ resource "aws_lambda_permission" "function_url_public" {
   function_url_auth_type = "NONE"
 }
 
+resource "aws_lambda_permission" "function_url_invoke" {
+  statement_id  = "FunctionURLAllowInvokeAction"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.bot.function_name
+  principal     = "*"
+}
+
 # ---------------------------------------------------------------------------
 # EventBridge Scheduler — goi cookbot-daily-prd luc 9h sang gio VN.
 # Scheduler tu dung role_arn de InvokeFunction, khong can aws_lambda_permission

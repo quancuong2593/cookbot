@@ -61,3 +61,39 @@ Ngoài phần trên, quyết định dùng container image cho Lambda (thay vì 
 **Lý do:** Ưu tiên có hạ tầng chạy được trước (dự án đang ở giai đoạn học/dựng nền, một mình tôi vận hành, chưa có traffic thật), tránh việc vừa học Terraform vừa phải tự liệt kê chính xác từng action IAM cần thiết (rất dễ thiếu quyền, gây debug vòng vo giữa "lỗi do Terraform" và "lỗi do thiếu quyền IAM" — mất thời gian hơn giá trị nhận được ở quy mô hiện tại).
 
 **Đánh đổi — đây là nợ kỹ thuật có ý thức, không phải sơ suất:** `AdministratorAccess` mâu thuẫn trực tiếp với chính nguyên tắc least-privilege đang áp dụng bên trong `main.tf` (IAM role của Lambda chỉ được cấp đúng `logs:CreateLogStream`/`PutLogEvents` trên 2 log group cụ thể, IAM role của Scheduler chỉ được `lambda:InvokeFunction` trên đúng 1 function) — người vận hành (tôi) lại có quyền rộng hơn tất cả các resource đó cộng lại. Rủi ro cụ thể: access key của IAM User này bị lộ (commit nhầm, máy dev bị xâm nhập) đồng nghĩa toàn bộ tài khoản AWS bị chiếm, không chỉ riêng CookBot. Hướng xử lý sau này: thay `AdministratorAccess` bằng một custom IAM policy chỉ liệt kê đúng các action/resource mà `terraform/` cần (ecr:*, iam:CreateRole/PutRolePolicy giới hạn theo path/prefix `cookbot-*`, lambda:*, scheduler:*, logs:*, budgets:*, tất cả scope theo tên resource `cookbot-*`), hoặc tốt hơn — bỏ hẳn access key dài hạn, chuyển sang AWS SSO / assume-role tạm thời (`aws sts assume-role`, credentials hết hạn sau vài giờ) cho việc chạy Terraform.
+
+## [2026-07-22] Container image (ECR) thay vì ZIP package cho Lambda
+
+**Bối cảnh:** AWS Lambda hỗ trợ 2 cách đóng gói code: ZIP file (giới hạn 250MB sau giải nén, upload trực tiếp hoặc qua S3) hoặc container image (tới 10GB, đẩy qua ECR). CookBot phụ thuộc `python-telegram-bot`, `anthropic`, `httpx` và các dependency transitive — không phải codebase siêu nhẹ. Nhưng yếu tố quyết định không phải dung lượng: dự án đã có sẵn `Dockerfile` cho VPS, muốn 2 Lambda build ra từ đúng 1 quy trình `docker build` quen thuộc, đúng 1 nguồn dependency, thay vì học thêm cách đóng gói ZIP riêng cho Lambda.
+
+**Quyết định:** Đóng gói cả 2 Lambda dưới dạng container image, build từ `Dockerfile.lambda` (base `public.ecr.aws/lambda/python:3.12`), đẩy lên `aws_ecr_repository.cookbot`, Lambda function trỏ `image_uri` vào đó thay vì upload ZIP.
+
+**Lý do:** Tái dùng được quy trình `docker build` đã quen — giống hệt `Dockerfile` cho VPS, chỉ khác base image và `CMD`/`image_config.command`. Test local dễ hơn: `docker run` image Lambda y hệt cách test image VPS, không cần mô phỏng riêng ZIP runtime. Không bị giới hạn 250MB — không phải lo cắt bớt dependency nếu sau này thêm thư viện nặng hơn (ví dụ SDK cho DynamoDB khi làm conversation memory).
+
+**Đánh đổi:** Cold start container image thường chậm hơn ZIP một chút (image lớn hơn, phải pull layer) — chấp nhận được vì CookBot không cần độ trễ dưới 1 giây. Quan trọng hơn — chọn container image kéo theo toàn bộ ràng buộc của mô hình chạy Lambda **ephemeral**: filesystem không persistent (mọi ghi đĩa mất khi container bị xoá — nguyên nhân gốc của "Cạm bẫy đã gặp" #2 trong CLAUDE.md, `notifier.setup_logging()` từng crash vì cố ghi `cookbot.log`), log phải đi CloudWatch thay vì file cục bộ, và state cần sống qua nhiều lần gọi phải nằm ở dịch vụ ngoài container (ví dụ DynamoDB cho idempotency key theo `update_id` — xem nợ kỹ thuật "Webhook retry" trong CLAUDE.md) chứ không thể lưu biến RAM hay file cục bộ rồi kỳ vọng lần gọi sau còn thấy. Các hệ quả này đã ghi chi tiết trong mục "Một Docker image cho cả 2 Lambda handler" (2026-07-20) — không nhắc lại toàn văn ở đây.
+
+**Đảo ngược được không:** Được, nhưng tốn công — chuyển về ZIP nghĩa là viết lại toàn bộ pipeline build/deploy (bỏ `docker build`/ECR/`image_uri`, thay bằng đóng gói `.zip` + `pip install -t`), mất luôn lợi ích "giống VPS". Không có gì trong `core/`/`runners/` phải đổi vì đây là quyết định ở tầng đóng gói — code Python không biết mình được đóng gói kiểu gì.
+
+## [2026-07-22] Function URL authorization_type = NONE, xác thực bằng webhook secret ở tầng ứng dụng
+
+**Bối cảnh:** Lambda Function URL hỗ trợ 2 kiểu authorization: `AWS_IAM` (Lambda tự xác thực bằng chữ ký SigV4, chặn hết request không ký đúng) và `NONE` (public — ai gọi cũng chạm được tới Lambda, muốn xác thực phải tự làm trong code). `cookbot-bot-prd` nhận webhook TỪ Telegram — Telegram gọi HTTP POST thẳng, không hỗ trợ ký AWS SigV4 (đó là cơ chế riêng của AWS; Telegram không biết và không nên biết access key AWS của bạn).
+
+**Quyết định:** Đặt `authorization_type = "NONE"` trên `aws_lambda_function_url.bot`, tự xác thực trong code bằng cách so khớp header `X-Telegram-Bot-Api-Secret-Token` với `config.WEBHOOK_SECRET` ngay trong `runners/lambda_bot.py` — sai secret trả `403` ngay, không xử lý gì thêm.
+
+**Lý do:** `AWS_IAM` an toàn hơn về nguyên tắc nhưng không dùng được với Telegram làm caller — không có cách nào cấu hình Telegram ký SigV4 khi gọi webhook. `NONE` + secret token tự quản là cách duy nhất khớp giao thức webhook của Telegram — bản thân Telegram cũng thiết kế sẵn cơ chế `secret_token` (đặt lúc gọi `setWebhook`) chính là để bù cho việc endpoint buộc phải public.
+
+**Đánh đổi:** Endpoint Function URL public hoàn toàn với AWS — bất kỳ ai trên Internet gọi được, không cần AWS credentials, khác hẳn phần còn lại của hạ tầng (Lambda exec role, Scheduler role đều least-privilege, chỉ nội bộ AWS gọi được). Bảo vệ hoàn toàn dựa vào 1 secret string ở tầng ứng dụng — `WEBHOOK_SECRET` lộ nghĩa là ai cũng gọi được `handle_message` thật, tốn tiền Claude API và có thể mạo danh gửi tin. Giảm thiểu bằng: secret đủ dài (khuyến nghị sinh bằng `openssl rand -hex 32`), khai báo qua Terraform variable `sensitive = true`, không hardcode.
+
+**Đảo ngược được không:** Không thực sự — miễn còn dùng Telegram làm kênh nhắn tin, `NONE` + secret token là bắt buộc, không phải một trong nhiều lựa chọn ngang nhau. Chỉ đổi được nếu đổi hẳn kênh nhắn tin sang thứ hỗ trợ SigV4 — không nằm trong kế hoạch hiện tại.
+
+## [2026-07-22] Không đặt reserved_concurrent_executions cho 2 Lambda
+
+**Bối cảnh:** Cân nhắc đặt `reserved_concurrent_executions` cho `cookbot-bot-prd` để đảm bảo luôn có slot chạy, không bị Lambda khác trong cùng account/region giành hết concurrency — nhưng `terraform apply` từ chối: account hiện tại có tổng quota concurrency mặc định chỉ 10, và AWS bắt buộc giữ tối thiểu 10 "unreserved" cho toàn account/region. Đặt reserved cho bất kỳ function nào (dù chỉ 1) cũng đẩy phần unreserved xuống dưới 10 → bị từ chối (xem "Cạm bẫy đã gặp" #4 trong CLAUDE.md).
+
+**Quyết định:** Không đặt `reserved_concurrent_executions` cho cả `cookbot-bot-prd` lẫn `cookbot-daily-prd` — dùng chung pool unreserved mặc định của account/region.
+
+**Lý do:** Không có cách đặt reserved concurrency mà không xin AWS tăng quota tổng trước — đó là thao tác thủ công ngoài Terraform (Service Quotas console/Support Case), không đáng làm ở quy mô traffic gia đình hiện tại (vài chục request/ngày, không có rủi ro thực tế bị Lambda khác giành hết 10 slot).
+
+**Đánh đổi:** Không có cam kết concurrency tối thiểu cho `cookbot-bot-prd` — nếu sau này thêm nhiều Lambda khác vào cùng account/region (ví dụ mở rộng sang Messenger) và tổng traffic tăng, về lý thuyết `cookbot-bot-prd` có thể bị throttle nếu Lambda khác chiếm hết slot cùng lúc. Rủi ro thấp và mang tính lý thuyết ở quy mô hiện tại.
+
+**Đảo ngược được không:** Được, dễ — xin AWS tăng Service Quota "Concurrent executions" lên đủ cao (miễn phí, chỉ mất thời gian chờ AWS duyệt), rồi thêm `reserved_concurrent_executions` vào `aws_lambda_function.bot` trong `main.tf`. Không đụng gì tới code Python.

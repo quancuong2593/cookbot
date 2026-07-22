@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Bot
 from telegram.constants import ParseMode
 import config
@@ -18,8 +19,17 @@ async def send_log(text: str) -> None:
         logging.error(f"Loi gui log: {e}")
 
 def setup_logging() -> None:
+    """StreamHandler luon co (Lambda tu gom stdout vao CloudWatch). FileHandler
+    chi them khi KHONG chay tren Lambda — filesystem cua Lambda chi-doc tru
+    /tmp (ma /tmp cung khong persistent nen ghi vao do cung vo nghia)."""
+    handlers = [logging.StreamHandler()]
+    if "AWS_LAMBDA_FUNCTION_NAME" not in os.environ:
+        handlers.append(logging.FileHandler("cookbot.log", encoding="utf-8"))
+
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(message)s",
         level=logging.INFO,
-        handlers=[logging.FileHandler("cookbot.log", encoding="utf-8"),
-                  logging.StreamHandler()])
+        handlers=handlers,
+        # Lambda runtime da tu cau hinh logging san; basicConfig() se bi
+        # bo qua lang le neu thieu force=True (chi ap dung khi chua co handler).
+        force=True)
